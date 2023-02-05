@@ -1,0 +1,44 @@
+version: 0.2
+
+#env:
+  #variables:
+    #JAVA_HOME: "/usr/lib/jvm/java-8-openjdk-amd64"
+
+phases:
+  install:
+    commands:
+      - echo Entered the install phase...
+      - apt-get update -y
+      - apt-get install -y maven
+      - echo "JAVA_HOME"
+      - echo $JAVA_HOME
+      - java --version
+      - mvn --version
+    finally:
+      - echo This always runs even if the update or install command fails 
+  pre_build:
+    commands:
+      - echo Entered the pre_build phase...
+    finally:
+      - echo This always runs even if the login command fails 
+  build:
+    commands:
+      - echo Entered the build phase...
+      - echo Build started on `date`
+      - mvn install
+    finally:
+      - echo This always runs even if the install command fails
+  post_build:
+    commands:
+      - echo Entered the post_build phase...
+      - echo Build completed on `date`
+      - aws cloudformation package --template template.yml --s3-bucket $S3_BUCKET --output-template-file template-export.yml
+      
+artifacts:
+  files:
+    - target/java-events-1.0-SNAPSHOT.jar
+    - template-export.yml
+  discard-paths: yes
+cache:
+  paths:
+    - '/root/.m2/**/*'
