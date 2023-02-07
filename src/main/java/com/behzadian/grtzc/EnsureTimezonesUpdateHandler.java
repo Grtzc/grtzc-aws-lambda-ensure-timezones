@@ -7,7 +7,6 @@ import com.amazonaws.services.dynamodbv2.document.DynamoDB;
 import com.amazonaws.services.dynamodbv2.document.Item;
 import com.amazonaws.services.dynamodbv2.document.PutItemOutcome;
 import com.amazonaws.services.dynamodbv2.document.Table;
-import com.amazonaws.services.dynamodbv2.model.AttributeValue;
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 import com.amazonaws.services.lambda.runtime.events.APIGatewayV2HTTPEvent;
@@ -31,7 +30,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.HashMap;
-import java.util.Map;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -40,8 +38,8 @@ public class EnsureTimezonesUpdateHandler implements RequestHandler<APIGatewayV2
 	Gson gson = new GsonBuilder().setPrettyPrinting().create();
 	private static final AWSSimpleSystemsManagement ssm = AWSSimpleSystemsManagementClientBuilder.defaultClient();
 	private AmazonDynamoDB amazonDynamoDB;
-	private String DYNAMODB_TABLE_NAME = "grtzc-timezones";
-	private Regions REGION = Regions.US_EAST_1;
+	private final String DYNAMODB_TABLE_NAME = "grtzc-timezones";
+	private final Regions REGION = Regions.US_EAST_1;
 
 	@Override
 	public APIGatewayV2HTTPResponse handleRequest(APIGatewayV2HTTPEvent event, Context context) {
