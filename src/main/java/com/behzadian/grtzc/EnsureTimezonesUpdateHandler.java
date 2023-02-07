@@ -36,7 +36,6 @@ import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
-// Handler value: example.Handler
 public class EnsureTimezonesUpdateHandler implements RequestHandler<APIGatewayV2HTTPEvent, APIGatewayV2HTTPResponse> {
 	Gson gson = new GsonBuilder().setPrettyPrinting().create();
 	private static final AWSSimpleSystemsManagement ssm = AWSSimpleSystemsManagementClientBuilder.defaultClient();
