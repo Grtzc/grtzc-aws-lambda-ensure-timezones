@@ -16,7 +16,7 @@ Resources:
       Runtime: java11
       Description: Java function
       MemorySize: 512
-      Timeout: 1000
+      Timeout: 900
       # Function's execution role
       Policies:
         - AWSLambdaBasicExecutionRole
