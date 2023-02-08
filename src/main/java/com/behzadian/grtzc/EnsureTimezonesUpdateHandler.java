@@ -15,6 +15,7 @@ import com.amazonaws.services.simplesystemsmanagement.AWSSimpleSystemsManagement
 import com.amazonaws.services.simplesystemsmanagement.AWSSimpleSystemsManagementClientBuilder;
 import com.amazonaws.services.simplesystemsmanagement.model.GetParameterRequest;
 import com.amazonaws.services.simplesystemsmanagement.model.GetParameterResult;
+import com.amazonaws.services.simplesystemsmanagement.model.PutParameterRequest;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 
@@ -29,7 +30,9 @@ import java.nio.channels.ReadableByteChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.attribute.FileTime;
 import java.util.HashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -40,6 +43,11 @@ public class EnsureTimezonesUpdateHandler implements RequestHandler<APIGatewayV2
 	private AmazonDynamoDB amazonDynamoDB;
 	private final String DYNAMODB_TABLE_NAME = "grtzc-timezones";
 	private final Regions REGION = Regions.US_EAST_1;
+	private final String grtzc_tz_src_url = "grtzc_tz_src_url";
+	private final String grtzc_tz_last_modified_millis = "grtzc_tz_last_modified_millis";
+	private final String grtzc_tz_last_parsed_record_index = "grtzc_tz_last_parsed_record_index";
+	private final String grtzc_tz_parsing = "grtzc_tz_parsing";
+	private boolean _parsing;
 
 	@Override
 	public APIGatewayV2HTTPResponse handleRequest(APIGatewayV2HTTPEvent event, Context context) {
@@ -53,12 +61,21 @@ public class EnsureTimezonesUpdateHandler implements RequestHandler<APIGatewayV2
 	private APIGatewayV2HTTPResponse execute() throws IOException, URISyntaxException {
 		this.amazonDynamoDB = AmazonDynamoDBClientBuilder.standard().withRegion(REGION).build();
 
-		URL tzUri = new URL(getProperty("grtzc_tz_src_url"));
+		URL tzUri = new URL(getProperty(grtzc_tz_src_url));
+		long lastModified = tryParseLong(getProperty(grtzc_tz_last_modified_millis), 0);
+		int lastParsedIndex = tryParseInt(getProperty(grtzc_tz_last_parsed_record_index), 0);
+
+		// holds information if we are in the middle of parsing new file or not (execution of method may take longer that maximum)
+		_parsing = tryParseBoolean(getProperty(grtzc_tz_parsing));
 		ReadableByteChannel readableByteChannel = Channels.newChannel(tzUri.openStream());
 		String dbZip = "/tmp/db.zip";
 		String dbFolder = "/tmp/db/";
 		try (FileOutputStream fileOutputStream = new FileOutputStream(dbZip)) {
 			fileOutputStream.getChannel().transferFrom(readableByteChannel, 0, Long.MAX_VALUE);
+			FileTime lastModifiedTime = Files.getLastModifiedTime(Path.of(dbZip));
+			if (lastModifiedTime.toMillis() <= lastModified && !_parsing)
+				return null;
+			putParameter(grtzc_tz_last_modified_millis, String.valueOf(lastModifiedTime.toMillis()));
 			unzip(dbZip, dbFolder);
 			File dbPath = new File(dbFolder);
 			String[] files = dbPath.list();
@@ -83,43 +100,51 @@ public class EnsureTimezonesUpdateHandler implements RequestHandler<APIGatewayV2
 			if (timeZonesFile == null)
 				return null;
 			HashMap<String, String> countries = importCountries(dbFolder + countriesFile);
-			importTimezones(dbFolder + timeZonesFile, countries);
+			importTimezones(dbFolder + timeZonesFile, countries, lastParsedIndex);
 		}
+		putParameter(grtzc_tz_parsing, "0");
 		return null;
 	}
 
-	private void importTimezones(String timeZonesFile, HashMap<String, String> countries) throws IOException {
+	private void importTimezones(String timeZonesFile, HashMap<String, String> countries, int lastParsedIndex) throws IOException {
+		if (!_parsing)
+			putParameter(grtzc_tz_parsing, "1");
 		try (Stream<String> lines = Files.lines(Path.of(timeZonesFile))) {
 			DynamoDB dynamoDB = new DynamoDB(amazonDynamoDB);
 			Table table = dynamoDB.getTable(DYNAMODB_TABLE_NAME);
+			AtomicInteger index = new AtomicInteger();
 			lines.forEach(line -> {
+				if (lastParsedIndex < index.getAndIncrement()) {
+					String[] vals = line.split(",");
+					if (vals.length != 6)
+						throw new RuntimeException("line has not exactly two parts: " + line);
+					String continentCity = vals[0];
+					String continent = continentCity.split("/")[0];
+					String city = continentCity.split("/")[1];
+					String countryCode = vals[1];
+					String countryName = countries.get(countryCode);
+					String tzCode = vals[2];
+					long begin = tryParseLong(vals[3], 0);
+					int offset = tryParseInt(vals[4], 0);
+					boolean dst = tryParseBoolean(vals[5]);
 
-				String[] vals = line.split(",");
-				if (vals.length != 6)
-					throw new RuntimeException("line has not exactly two parts: " + line);
-				String continentCity = vals[0];
-				String continent = continentCity.split("/")[0];
-				String city = continentCity.split("/")[1];
-				String countryCode = vals[1];
-				String countryName = countries.get(countryCode);
-				String tzCode = vals[2];
-				long begin = tryParseLong(vals[3], 0);
-				int offset = tryParseInt(vals[4], 0);
-				boolean dst = tryParseBoolean(vals[5]);
+					Item item = new Item()
+							.withPrimaryKey("ID", continentCity + "@" + begin)
+							.withString("Continent", continent)
+							.withString("CountryCode", countryCode)
+							.withString("CountryName", countryName)
+							.withString("City", city)
+							.withString("TimezoneAbbr", tzCode)
+							.withNumber("Beginning", begin)
+							.withNumber("Offset", offset)
+							.withBoolean("DaylightSavingTime", dst);
 
-				Item item = new Item()
-						.withPrimaryKey("ID", continentCity + "@" + begin)
-						.withString("Continent", continent)
-						.withString("CountryCode", countryCode)
-						.withString("CountryName", countryName)
-						.withString("City", city)
-						.withString("TimezoneAbbr", tzCode)
-						.withNumber("Beginning", begin)
-						.withNumber("Offset", offset)
-						.withBoolean("DaylightSavingTime", dst);
-
-				PutItemOutcome outcome = table.putItem(item);
+					PutItemOutcome outcome = table.putItem(item);
+					if (index.get() % 1000 == 0)
+						putParameter(grtzc_tz_last_parsed_record_index, String.valueOf(index.get()));
+				}
 			});
+			putParameter(grtzc_tz_last_parsed_record_index, String.valueOf(index.get()));
 		}
 	}
 
@@ -200,5 +225,10 @@ public class EnsureTimezonesUpdateHandler implements RequestHandler<APIGatewayV2
 		GetParameterRequest request = new GetParameterRequest().withName(name);
 		GetParameterResult parameter = ssm.getParameter(request);
 		return parameter.getParameter().getValue();
+	}
+
+	private void putParameter(String name, String value) {
+		PutParameterRequest request = new PutParameterRequest().withName(name).withValue(value);
+		ssm.putParameter(request);
 	}
 }
