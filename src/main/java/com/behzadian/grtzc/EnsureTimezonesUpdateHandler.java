@@ -31,6 +31,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.attribute.FileTime;
+import java.rmi.RemoteException;
 import java.util.HashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
@@ -46,8 +47,10 @@ public class EnsureTimezonesUpdateHandler implements RequestHandler<APIGatewayV2
 	private final String grtzc_tz_src_url = "grtzc_tz_src_url";
 	private final String grtzc_tz_last_modified_millis = "grtzc_tz_last_modified_millis";
 	private final String grtzc_tz_last_parsed_record_index = "grtzc_tz_last_parsed_record_index";
+	private final String grtzc_tz_last_parsed_record_checkpoint_count_step = "grtzc_tz_last_parsed_record_checkpoint_count_step";
 	private final String grtzc_tz_parsing = "grtzc_tz_parsing";
 	private boolean _parsing;
+	private int lastParsedCheckpointStep;
 
 	@Override
 	public APIGatewayV2HTTPResponse handleRequest(APIGatewayV2HTTPEvent event, Context context) {
@@ -64,6 +67,9 @@ public class EnsureTimezonesUpdateHandler implements RequestHandler<APIGatewayV2
 		URL tzUri = new URL(getProperty(grtzc_tz_src_url));
 		long lastModified = tryParseLong(getProperty(grtzc_tz_last_modified_millis), 0);
 		int lastParsedIndex = tryParseInt(getProperty(grtzc_tz_last_parsed_record_index), 0);
+		lastParsedCheckpointStep = tryParseInt(getProperty(grtzc_tz_last_parsed_record_checkpoint_count_step), 1000);
+		if (lastParsedCheckpointStep <= 0)
+			throw new RemoteException("lastParsedCheckpointStep: " + lastParsedCheckpointStep + " is zero or less");
 
 		// holds information if we are in the middle of parsing new file or not (execution of method may take longer that maximum)
 		_parsing = tryParseBoolean(getProperty(grtzc_tz_parsing));
@@ -140,7 +146,7 @@ public class EnsureTimezonesUpdateHandler implements RequestHandler<APIGatewayV2
 							.withBoolean("DaylightSavingTime", dst);
 
 					PutItemOutcome outcome = table.putItem(item);
-					if (index.get() % 1000 == 0)
+					if (index.get() % lastParsedCheckpointStep == 0)
 						putParameter(grtzc_tz_last_parsed_record_index, String.valueOf(index.get()));
 				}
 			});
