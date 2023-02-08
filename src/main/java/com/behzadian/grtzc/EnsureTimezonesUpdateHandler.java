@@ -228,7 +228,10 @@ public class EnsureTimezonesUpdateHandler implements RequestHandler<APIGatewayV2
 	}
 
 	private void putParameter(String name, String value) {
-		PutParameterRequest request = new PutParameterRequest().withName(name).withValue(value);
+		PutParameterRequest request = new PutParameterRequest()
+				.withName(name)
+				.withOverwrite(true)
+				.withValue(value);
 		ssm.putParameter(request);
 	}
 }
