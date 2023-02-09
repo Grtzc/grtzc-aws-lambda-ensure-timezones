@@ -71,13 +71,15 @@ public class EnsureTimezonesUpdateHandler implements RequestHandler<APIGatewayV2
 
 	private APIGatewayV2HTTPResponse execute() throws IOException, URISyntaxException {
 		this.amazonDynamoDB = AmazonDynamoDBClientBuilder.standard().withRegion(REGION).build();
+		log("Start executing function");
 
 		URL tzUri = new URL(getProperty(grtzc_tz_src_url));
 		long lastModified = tryParseLong(getProperty(grtzc_tz_last_modified_millis), 0);
 		int lastParsedIndex = tryParseInt(getProperty(grtzc_tz_last_parsed_record_index), 0);
 		lastParsedCheckpointStep = tryParseInt(getProperty(grtzc_tz_last_parsed_record_checkpoint_count_step), 1000);
-		if (lastParsedCheckpointStep <= 0)
+		if (lastParsedCheckpointStep <= 0) {
 			throw new RemoteException("lastParsedCheckpointStep: " + lastParsedCheckpointStep + " is zero or less");
+		}
 
 		// holds information if we are in the middle of parsing new file or not (execution of method may take longer that maximum)
 		_parsing = tryParseBoolean(getProperty(grtzc_tz_parsing));
@@ -87,14 +89,18 @@ public class EnsureTimezonesUpdateHandler implements RequestHandler<APIGatewayV2
 		try (FileOutputStream fileOutputStream = new FileOutputStream(dbZip)) {
 			fileOutputStream.getChannel().transferFrom(readableByteChannel, 0, Long.MAX_VALUE);
 			FileTime lastModifiedTime = Files.getLastModifiedTime(Path.of(dbZip));
-			if (lastModifiedTime.toMillis() <= lastModified && !_parsing)
+			if (lastModifiedTime.toMillis() <= lastModified && !_parsing) {
+				log("While we are not at the middle of parsing, file is not modified since last time. lastModifiedTime: %s lastModified: %s", lastModifiedTime.toMillis(), lastModified);
 				return null;
+			}
 			putParameter(grtzc_tz_last_modified_millis, String.valueOf(lastModifiedTime.toMillis()));
 			unzip(dbZip, dbFolder);
 			File dbPath = new File(dbFolder);
 			String[] files = dbPath.list();
-			if (files == null)
+			if (files == null) {
+				log("No file extracted");
 				return null;
+			}
 			String countriesFile = null;
 			String timeZonesFile = null;
 			for (String file : files) {
@@ -109,10 +115,14 @@ public class EnsureTimezonesUpdateHandler implements RequestHandler<APIGatewayV2
 					continue;
 				}
 			}
-			if (countriesFile == null)
+			if (countriesFile == null) {
+				log("No countries file");
 				return null;
-			if (timeZonesFile == null)
+			}
+			if (timeZonesFile == null) {
+				log("No zones file");
 				return null;
+			}
 			HashMap<String, String> countries = importCountries(dbFolder + countriesFile);
 			importTimezones(dbFolder + timeZonesFile, countries, lastParsedIndex);
 		}
@@ -121,8 +131,10 @@ public class EnsureTimezonesUpdateHandler implements RequestHandler<APIGatewayV2
 	}
 
 	private void importTimezones(String timeZonesFile, HashMap<String, String> countries, int lastParsedIndex) throws IOException {
-		if (!_parsing)
+		if (!_parsing) {
+			log("Set parsing...");
 			putParameter(grtzc_tz_parsing, "1");
+		}
 		try (Stream<String> lines = Files.lines(Path.of(timeZonesFile))) {
 			DynamoDB dynamoDB = new DynamoDB(amazonDynamoDB);
 			Table table = dynamoDB.getTable(DYNAMODB_TABLE_NAME);
@@ -130,7 +142,8 @@ public class EnsureTimezonesUpdateHandler implements RequestHandler<APIGatewayV2
 			for (String line : lines.collect(Collectors.toList())) {
 				if (lastParsedIndex < index.getAndIncrement()) {
 					parseLine(line, countries, table);
-					if (safeTimeMillis < theContext.getRemainingTimeInMillis()) {
+					if (theContext.getRemainingTimeInMillis() < safeTimeMillis) {
+						log("Stop parsing because remained execution millis (%s) is less than safe millis (%s)", theContext.getRemainingTimeInMillis(), safeTimeMillis);
 						putParameter(grtzc_tz_last_parsed_record_index, String.valueOf(index.get()));
 						callSelf();
 						return;
@@ -139,6 +152,10 @@ public class EnsureTimezonesUpdateHandler implements RequestHandler<APIGatewayV2
 			}
 			putParameter(grtzc_tz_last_parsed_record_index, String.valueOf(index.get()));
 		}
+	}
+
+	private void log(String format, Object... vals) {
+		System.out.printf((format) + "%n", vals);
 	}
 
 	private void callSelf() {
