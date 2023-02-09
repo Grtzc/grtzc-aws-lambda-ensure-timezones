@@ -7,6 +7,10 @@ import com.amazonaws.services.dynamodbv2.document.DynamoDB;
 import com.amazonaws.services.dynamodbv2.document.Item;
 import com.amazonaws.services.dynamodbv2.document.PutItemOutcome;
 import com.amazonaws.services.dynamodbv2.document.Table;
+import com.amazonaws.services.lambda.AWSLambda;
+import com.amazonaws.services.lambda.AWSLambdaAsyncClient;
+import com.amazonaws.services.lambda.model.InvocationType;
+import com.amazonaws.services.lambda.model.InvokeRequest;
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 import com.amazonaws.services.lambda.runtime.events.APIGatewayV2HTTPEvent;
@@ -34,6 +38,7 @@ import java.nio.file.attribute.FileTime;
 import java.rmi.RemoteException;
 import java.util.HashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -51,10 +56,13 @@ public class EnsureTimezonesUpdateHandler implements RequestHandler<APIGatewayV2
 	private final String grtzc_tz_parsing = "grtzc_tz_parsing";
 	private boolean _parsing;
 	private int lastParsedCheckpointStep;
+	private Context theContext;
+	private static final int safeTimeMillis = 10 * 1000;
 
 	@Override
 	public APIGatewayV2HTTPResponse handleRequest(APIGatewayV2HTTPEvent event, Context context) {
 		try {
+			theContext = context;
 			return execute();
 		} catch (IOException | URISyntaxException e) {
 			throw new RuntimeException(e);
@@ -119,39 +127,55 @@ public class EnsureTimezonesUpdateHandler implements RequestHandler<APIGatewayV2
 			DynamoDB dynamoDB = new DynamoDB(amazonDynamoDB);
 			Table table = dynamoDB.getTable(DYNAMODB_TABLE_NAME);
 			AtomicInteger index = new AtomicInteger();
-			lines.forEach(line -> {
+			for (String line : lines.collect(Collectors.toList())) {
 				if (lastParsedIndex < index.getAndIncrement()) {
-					String[] vals = line.split(",");
-					if (vals.length != 6)
-						throw new RuntimeException("line has not exactly two parts: " + line);
-					String continentCity = vals[0];
-					String continent = continentCity.split("/")[0];
-					String city = continentCity.split("/")[1];
-					String countryCode = vals[1];
-					String countryName = countries.get(countryCode);
-					String tzCode = vals[2];
-					long begin = tryParseLong(vals[3], 0);
-					int offset = tryParseInt(vals[4], 0);
-					boolean dst = tryParseBoolean(vals[5]);
-
-					Item item = new Item()
-							.withPrimaryKey("ID", continentCity + "@" + begin)
-							.withString("Continent", continent)
-							.withString("CountryCode", countryCode)
-							.withString("CountryName", countryName)
-							.withString("City", city)
-							.withString("TimezoneAbbr", tzCode)
-							.withNumber("Beginning", begin)
-							.withNumber("Offset", offset)
-							.withBoolean("DaylightSavingTime", dst);
-
-					PutItemOutcome outcome = table.putItem(item);
-					if (index.get() % lastParsedCheckpointStep == 0)
+					parseLine(line, countries, table);
+					if (safeTimeMillis < theContext.getRemainingTimeInMillis()) {
 						putParameter(grtzc_tz_last_parsed_record_index, String.valueOf(index.get()));
+						callSelf();
+						return;
+					}
 				}
-			});
+			}
 			putParameter(grtzc_tz_last_parsed_record_index, String.valueOf(index.get()));
 		}
+	}
+
+	private void callSelf() {
+		AWSLambda client = AWSLambdaAsyncClient.builder().withRegion(REGION).build();
+		InvokeRequest request = new InvokeRequest();
+		request
+				.withFunctionName(theContext.getFunctionName())
+				.withInvocationType(InvocationType.Event);
+		client.invoke(request);
+	}
+
+	private void parseLine(String line, HashMap<String, String> countries, Table table) {
+		String[] vals = line.split(",");
+		if (vals.length != 6)
+			throw new RuntimeException("line has not exactly two parts: " + line);
+		String continentCity = vals[0];
+		String continent = continentCity.split("/")[0];
+		String city = continentCity.split("/")[1];
+		String countryCode = vals[1];
+		String countryName = countries.get(countryCode);
+		String tzCode = vals[2];
+		long begin = tryParseLong(vals[3], 0);
+		int offset = tryParseInt(vals[4], 0);
+		boolean dst = tryParseBoolean(vals[5]);
+
+		Item item = new Item()
+				.withPrimaryKey("ID", continentCity + "@" + begin)
+				.withString("Continent", continent)
+				.withString("CountryCode", countryCode)
+				.withString("CountryName", countryName)
+				.withString("City", city)
+				.withString("TimezoneAbbr", tzCode)
+				.withNumber("Beginning", begin)
+				.withNumber("Offset", offset)
+				.withBoolean("DaylightSavingTime", dst);
+
+		PutItemOutcome outcome = table.putItem(item);
 	}
 
 	private boolean tryParseBoolean(String val) {
